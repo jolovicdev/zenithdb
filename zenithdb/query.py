@@ -75,6 +75,7 @@ class Query:
         self.sort_fields: List[Tuple[str, str]] = []
         self.limit_value: Optional[int] = None
         self.skip_value: Optional[int] = None
+        self._query_cache = {}  # Add query cache
     
     def __getattr__(self, name: str) -> QueryField:
         """Support for field access."""
@@ -112,23 +113,35 @@ class Query:
         return self
     
     def execute(self) -> List[Dict[str, Any]]:
-        """Execute the query."""
-        if self.database is None:
-            raise RuntimeError("Query must be associated with a database")
-        if self.collection is None:
-            raise RuntimeError("Query must be associated with a collection")
-        return self.database.execute_query(self)
+        """Execute the query with caching."""
+        cache_key = self._generate_cache_key()
+        if cache_key in self._query_cache:
+            return self._query_cache[cache_key]
+            
+        result = self.database.execute_query(self)
+        self._query_cache[cache_key] = result
+        return result
+    
+    def _generate_cache_key(self) -> str:
+        """Generate a unique cache key for the query."""
+        return hash(str(self.to_dict()))
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert query to dictionary format."""
         result = {}
         for field, op, value in self.conditions:
+            # For nested fields, we want to keep them flat in the query
+            # but with dot notation
             if op == QueryOperator.EQ:
                 result[field] = value
             elif op == QueryOperator.CONTAINS:
-                result[field] = {"$contains": value}
+                if field not in result:
+                    result[field] = {}
+                result[field]["$contains"] = value
             elif op == QueryOperator.IN:
-                result[field] = {"$in": value}
+                if field not in result:
+                    result[field] = {}
+                result[field]["$in"] = value
             else:
                 op_map = {
                     QueryOperator.GT: "$gt",

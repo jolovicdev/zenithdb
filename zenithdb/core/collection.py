@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Callable
 from ..query import Query, QueryOperator
 from ..operations import BulkOperations
 from ..aggregations import Aggregations, AggregateFunction
@@ -10,13 +10,25 @@ class Collection:
         """Initialize collection with database connection and name."""
         self.database = database
         self.name = name
+        self.validator = None
+        
+    def set_validator(self, validator_func: Callable[[Dict[str, Any]], bool]):
+        """Set document validator function."""
+        self.validator = validator_func
     
     def insert(self, document: Dict[str, Any], doc_id: Optional[str] = None) -> str:
         """Insert a document into the collection."""
+        if self.validator and not self.validator(document):
+            raise ValueError("Document failed validation")
         return self.database.insert(self.name, document, doc_id)
     
     def insert_many(self, documents: List[Dict[str, Any]]) -> List[str]:
         """Insert multiple documents into the collection."""
+        if self.validator:
+            for doc in documents:
+                if not self.validator(doc):
+                    raise ValueError("Document failed validation")
+        
         with self.database.bulk_operations() as bulk_ops:
             return bulk_ops.bulk_insert(self.name, documents)
     
@@ -31,11 +43,17 @@ class Collection:
             for field, value in query.items():
                 if isinstance(value, dict):
                     for op, val in value.items():
-                        op = op.lstrip("$")  # Remove $ prefix
-                        if op == "gte":
+                        op = op.lstrip("$")
+                        if op == "gt":
+                            base_query.where(field, QueryOperator.GT, val)
+                        elif op == "gte":
                             base_query.where(field, QueryOperator.GTE, val)
+                        elif op == "lt":
+                            base_query.where(field, QueryOperator.LT, val)
                         elif op == "lte":
                             base_query.where(field, QueryOperator.LTE, val)
+                        elif op == "ne":
+                            base_query.where(field, QueryOperator.NE, val)
                         elif op == "in":
                             base_query.where(field, QueryOperator.IN, val)
                         elif op == "contains":

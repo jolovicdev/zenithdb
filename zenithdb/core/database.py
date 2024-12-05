@@ -129,79 +129,45 @@ class Database:
             ops = BulkOperations(conn)
             return ops.bulk_insert(collection, [document], [doc_id] if doc_id else None)[0]
     
-    def execute_query(self, query: Query) -> List[Dict[str, Any]]:
-        """Execute a query and return matching documents."""
-        with self.pool.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            sql_parts = ["SELECT id, data FROM documents"]
-            params = []
-            
-            where_conditions = []
-            for field, operator, value in query.conditions:
-                if field == "_id":
-                    where_conditions.append("id = ?")
-                    params.append(value)
-                elif field == "user_id":  # Special handling for relationships
-                    where_conditions.append(f"json_extract(data, '$.{field}') = ?")
-                    params.append(value)  # Don't JSON encode user_id
-                elif operator == QueryOperator.IN:
-                    placeholders = ','.join(['?' for _ in value])
-                    where_conditions.append(f"json_extract(data, '$.{field}') IN ({placeholders})")
-                    params.extend([json.dumps(v) if isinstance(v, str) else v for v in value])
-                elif operator == QueryOperator.BETWEEN:
-                    where_conditions.append(f"json_extract(data, '$.{field}') BETWEEN ? AND ?")
-                    params.extend([json.dumps(v) if isinstance(v, str) else v for v in value])
-                elif operator == QueryOperator.CONTAINS:
-                    # Handle array contains operation
-                    where_conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
-                    params.append(f'%{json.dumps(value)[1:-1]}%')
-                elif operator == QueryOperator.EQ:
-                    # Handle exact equality
-                    if '.' in field:
-                        # Handle nested fields
-                        where_conditions.append(f"json_extract(data, '$.{field}') = ?")
-                        params.append(json.dumps(value))  # Always JSON encode nested field values
-                    else:
-                        # Handle regular fields
-                        where_conditions.append(f"json_extract(data, '$.{field}') = ?")
-                        params.append(json.dumps(value) if isinstance(value, str) else value)
-                else:
-                    # Handle other operators
-                    if '.' in field:
-                        # Handle nested fields
-                        where_conditions.append(f"json_extract(data, '$.{field}') {operator.value} ?")
-                        params.append(json.dumps(value))  # Always JSON encode nested field values
-                    else:
-                        # Handle regular fields
-                        where_conditions.append(f"json_extract(data, '$.{field}') {operator.value} ?")
-                        params.append(json.dumps(value) if isinstance(value, str) else value)
-            
-            # Always add collection condition
-            where_conditions.append("collection = ?")
-            params.append(query.collection)
-            
-            if where_conditions:
-                sql_parts.append("WHERE " + " AND ".join(where_conditions))
-            
-            if query.sort_fields:
-                sort_clauses = [
-                    f"json_extract(data, '$.{field}') {direction}"
-                    for field, direction in query.sort_fields
-                ]
-                sql_parts.append("ORDER BY " + ", ".join(sort_clauses))
-            
-            if query.limit_value is not None:
-                sql_parts.append("LIMIT ?")
-                params.append(query.limit_value)
+    def execute_query(self, query: 'Query') -> List[Dict[str, Any]]:
+        """Execute a query and return results."""
+        conditions = []
+        params = []
+        
+        for field, op, value in query.conditions:
+            if value is None:
+                conditions.append(f"(json_extract(data, '$.{field}') IS NULL AND json_type(data, '$.{field}') IS NOT NULL)")
+                continue
                 
-                if query.skip_value is not None:
-                    sql_parts.append("OFFSET ?")
-                    params.append(query.skip_value)
-            
-            sql = " ".join(sql_parts)
-            cursor.execute(sql, params)
-            return [{"_id": row[0], **json.loads(row[1])} for row in cursor]
+            if op == QueryOperator.CONTAINS:
+                conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
+                params.append(f"%{value}%")
+            elif op == QueryOperator.EQ:
+                if '.' in field:
+                    # Handle nested field
+                    conditions.append(f"json_extract(data, '$.{field}') = ?")
+                else:
+                    conditions.append(f"json_extract(data, '$.{field}') = ?")
+                params.append(value)
+            else:
+                op_map = {
+                    QueryOperator.GT: ">",
+                    QueryOperator.GTE: ">=",
+                    QueryOperator.LT: "<",
+                    QueryOperator.LTE: "<=",
+                    QueryOperator.NE: "!=",
+                }
+                conditions.append(f"json_extract(data, '$.{field}') {op_map[op]} ?")
+                params.append(value)
+        
+        where_clause = " AND ".join(conditions) if conditions else "1"
+        sql = f"SELECT data FROM documents WHERE collection = ? AND {where_clause}"
+        params.insert(0, query.collection)
+        
+        with self.pool.get_connection() as conn:
+            cursor = conn.execute(sql, params)
+            results = cursor.fetchall()
+            return [json.loads(row[0]) for row in results]
     
     def update(self, collection: str, query: Dict[str, Any], update: Dict[str, Any]) -> int:
         """Update documents matching query."""
@@ -267,7 +233,13 @@ class Database:
                             if part not in current:
                                 current[part] = {}
                             current = current[part]
-                        current[parts[-1]] = value
+                        
+                        # Handle array index updates
+                        last_part = parts[-1]
+                        if current and isinstance(current, list) and last_part.isdigit():
+                            current[int(last_part)] = value
+                        else:
+                            current[last_part] = value
                 else:
                     doc.update(update)
                 
@@ -330,6 +302,17 @@ class Database:
             conn.commit()
             return deleted
     
+    def _check_connection_health(self, conn: sqlite3.Connection) -> bool:
+        """Check if connection is healthy."""
+        try:
+            conn.execute("SELECT 1").fetchone()
+            return True
+        except sqlite3.Error:
+            return False
+    
     def close(self):
         """Close all database connections."""
+        # Close connections in the same thread they were created
+        with self.pool.get_connection() as conn:
+            conn.close()
         self.pool.close_all()

@@ -22,14 +22,14 @@ class Migration:
 class MigrationManager:
     """Manages database migrations."""
     
-    def __init__(self, connection_pool: ConnectionPool):
+    def __init__(self, db_or_pool):
         """
         Initialize the migration manager.
         
         Args:
-            connection_pool: Database connection pool
+            db_or_pool: Database or ConnectionPool instance
         """
-        self.pool = connection_pool
+        self.pool = db_or_pool.pool if hasattr(db_or_pool, 'pool') else db_or_pool
         self.migrations: List[Migration] = []
         self._init_migrations_table()
     
@@ -119,3 +119,120 @@ class MigrationManager:
                 except Exception as e:
                     conn.rollback()
                     raise e 
+    
+    def init_migrations_table(self):
+        """Public method to initialize migrations table."""
+        with self.pool.get_connection() as conn:
+            conn.execute('DELETE FROM migrations')  # Clear existing migrations
+            conn.commit()
+        self._init_migrations_table()
+    
+    def apply_migration(self, migration_data: dict):
+        """
+        Apply a single migration from dictionary data.
+        
+        Args:
+            migration_data: Dictionary containing migration data
+            
+        Raises:
+            ValueError: If migration data is invalid
+        """
+        if not isinstance(migration_data, dict):
+            raise ValueError("Migration data must be a dictionary")
+            
+        required_fields = ['version', 'name', 'up', 'down']
+        if not all(field in migration_data for field in required_fields):
+            raise ValueError(f"Migration must contain fields: {', '.join(required_fields)}")
+            
+        # Check for duplicate version
+        if any(m.version == migration_data['version'] for m in self.migrations):
+            raise ValueError(f"Migration version {migration_data['version']} already exists")
+            
+        # Wrap the functions to handle connection
+        def wrap_func(func):
+            if func.__code__.co_argcount == 0:
+                return lambda conn: func()
+            return func
+            
+        migration = Migration(
+            version=migration_data['version'],
+            up=wrap_func(migration_data['up']),
+            down=wrap_func(migration_data['down'])
+        )
+        self.register_migration(migration)
+        self.migrate_up(migration.version)
+    
+    def get_applied_migrations(self) -> list:
+        """
+        Get list of applied migrations.
+        
+        Returns:
+            List of applied migration versions
+        """
+        with self.pool.get_connection() as conn:
+            cursor = conn.execute('SELECT version, applied_at FROM migrations ORDER BY version')
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def rollback_migration(self, migration_data: dict):
+        """
+        Rollback a specific migration.
+        
+        Args:
+            migration_data: Migration data to rollback
+        """
+        if not isinstance(migration_data, dict) or 'version' not in migration_data:
+            raise ValueError("Invalid migration data")
+            
+        with self.pool.get_connection() as conn:
+            # Find the migration to rollback
+            cursor = conn.execute('SELECT version FROM migrations WHERE version = ?', 
+                                (migration_data['version'],))
+            if not cursor.fetchone():
+                return  # Migration not applied
+                
+            # Execute down migration
+            migration = next((m for m in self.migrations if m.version == migration_data['version']), None)
+            if migration:
+                try:
+                    migration.down(conn)
+                    conn.execute('DELETE FROM migrations WHERE version = ?', 
+                               (migration_data['version'],))
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    raise e 
+    
+    def apply_migration(self, migration_data: dict):
+        """
+        Apply a single migration from dictionary data.
+        
+        Args:
+            migration_data: Dictionary containing migration data
+            
+        Raises:
+            ValueError: If migration data is invalid
+        """
+        if not isinstance(migration_data, dict):
+            raise ValueError("Migration data must be a dictionary")
+            
+        required_fields = ['version', 'name', 'up', 'down']
+        if not all(field in migration_data for field in required_fields):
+            raise ValueError(f"Migration must contain fields: {', '.join(required_fields)}")
+            
+        # Check for duplicate version
+        if any(m.version == migration_data['version'] for m in self.migrations):
+            raise ValueError(f"Migration version {migration_data['version']} already exists")
+            
+        # Wrap the functions to handle connection
+        def wrap_func(func):
+            if func.__code__.co_argcount == 0:
+                return lambda conn: func()
+            return func
+            
+        migration = Migration(
+            version=migration_data['version'],
+            up=wrap_func(migration_data['up']),
+            down=wrap_func(migration_data['down'])
+        )
+        self.register_migration(migration)
+        self.migrate_up(migration.version) 

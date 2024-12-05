@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
 BATCH_SIZE = 1000
 
@@ -14,6 +14,17 @@ class BulkOperations:
             raise TypeError("Expected sqlite3.Connection object")
         self.connection = connection
         self._transaction_active = False
+        self.retry_count = 3
+        self.progress_callback = None
+    
+    def set_progress_callback(self, callback: Callable[[int, int], None]):
+        """Set callback for progress updates."""
+        self.progress_callback = callback
+    
+    def _calculate_optimal_batch_size(self, documents: List[Dict[str, Any]]) -> int:
+        """Calculate optimal batch size based on document size."""
+        avg_doc_size = sum(len(str(doc)) for doc in documents[:100]) / min(100, len(documents))
+        return min(BATCH_SIZE, max(100, int(1_000_000 / avg_doc_size)))
     
     def __enter__(self):
         """Start a transaction."""
@@ -60,12 +71,15 @@ class BulkOperations:
                      for doc_id, doc in zip(doc_ids, documents)]
             
             # Insert in batches
+            total = len(documents)
             for i in range(0, len(values), BATCH_SIZE):
                 batch = values[i:i + BATCH_SIZE]
                 cursor.executemany(
                     "INSERT INTO documents (id, collection, data) VALUES (?, ?, ?)",
                     batch
                 )
+                if self.progress_callback:
+                    self.progress_callback(min(i + BATCH_SIZE, total), total)
             
             return doc_ids
         except Exception as e:
