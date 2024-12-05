@@ -106,3 +106,6 @@ country_counts = users.aggregate([{
 3. Add unique constraints where appropriate
 4. Close the database connection when done
 5. Use the Query builder for complex queries for better readability
+
+Note - **I don't advice using this in production (or anything serious).**
+I made this to avoid writing raw SQL queries for my own personal projects.

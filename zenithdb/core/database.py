@@ -1,19 +1,22 @@
 import sqlite3
 import json
-from typing import Dict, List, Any, Union, Optional
+from typing import Dict, List, Any, Union, Optional, Tuple
 from .connection_pool import ConnectionPool
 from .collection import Collection
 from ..query import Query, QueryOperator
 from ..operations import BulkOperations
 from ..aggregations import Aggregations, AggregateFunction
+import functools
+import hashlib
 
 class Database:
     """NoSQL-like database interface using SQLite as backend."""
     
-    def __init__(self, db_path: str, max_connections: int = 10):
+    def __init__(self, db_path: str, max_connections: int = 10, max_result_size: int = 10000):
         """Initialize database with connection pool."""
         self.db_path = db_path
         self.pool = ConnectionPool(db_path, max_connections)
+        self.max_result_size = max_result_size
         self._init_db()
     
     def collection(self, name: str) -> Collection:
@@ -26,21 +29,22 @@ class Database:
             return BulkOperations(conn)
     
     def _init_db(self):
-        """Initialize database with optimized settings and schema."""
+        """Initialize database with optimized settings."""
         with self.pool.get_connection() as conn:
-            # Performance optimizations
             conn.executescript('''
                 PRAGMA journal_mode=WAL;
                 PRAGMA synchronous=NORMAL;
                 PRAGMA temp_store=MEMORY;
                 PRAGMA page_size=4096;
-                PRAGMA cache_size=-16000;
+                PRAGMA cache_size=-32000;  -- 128MB cache
                 PRAGMA auto_vacuum=NONE;
                 PRAGMA locking_mode=EXCLUSIVE;
                 PRAGMA busy_timeout=5000;
+                PRAGMA mmap_size=536870912;  -- 512MB memory mapping
+                PRAGMA journal_size_limit=67108864;  -- 64MB journal size limit
+                PRAGMA threads=4;  -- Use multiple threads
             ''')
             
-            # Create tables with optimized schema
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
@@ -50,8 +54,8 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 
-                CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection);
-                CREATE INDEX IF NOT EXISTS idx_collection_id ON documents(collection, id);
+                CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection) WHERE collection IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_collection_id ON documents(collection, id) WHERE collection IS NOT NULL;
                 
                 CREATE TABLE IF NOT EXISTS indexes (
                     name TEXT PRIMARY KEY,
@@ -91,7 +95,7 @@ class Database:
             
             index_sql = f"""
                 CREATE {'UNIQUE' if unique else ''} INDEX IF NOT EXISTS {index_name}
-                ON documents({', '.join(field_exprs)})
+                ON documents({', '.join(['collection'] + field_exprs)})
                 WHERE collection = '{collection}'
             """
             conn.execute(index_sql)
@@ -130,7 +134,7 @@ class Database:
             return ops.bulk_insert(collection, [document], [doc_id] if doc_id else None)[0]
     
     def execute_query(self, query: 'Query') -> List[Dict[str, Any]]:
-        """Execute a query and return results."""
+        """Execute a query and return results with optimized execution."""
         conditions = []
         params = []
         
@@ -144,7 +148,6 @@ class Database:
                 params.append(f"%{value}%")
             elif op == QueryOperator.EQ:
                 if '.' in field:
-                    # Handle nested field
                     conditions.append(f"json_extract(data, '$.{field}') = ?")
                 else:
                     conditions.append(f"json_extract(data, '$.{field}') = ?")
@@ -161,13 +164,79 @@ class Database:
                 params.append(value)
         
         where_clause = " AND ".join(conditions) if conditions else "1"
-        sql = f"SELECT data FROM documents WHERE collection = ? AND {where_clause}"
-        params.insert(0, query.collection)
+        
+        # Add pagination if not specified
+        if query.limit_value is None:
+            query.limit_value = self.max_result_size
+        if query.skip_value is None:
+            query.skip_value = 0
+            
+        # Use optimized query with MATERIALIZED optimization
+        sql = f"""
+            WITH RECURSIVE
+            json_data AS MATERIALIZED (
+                SELECT data 
+                FROM documents
+                WHERE collection = ? AND {where_clause}
+                LIMIT ? OFFSET ?
+            )
+            SELECT * FROM json_data
+        """
+        
+        all_params = [query.collection] + params + [query.limit_value, query.skip_value]
         
         with self.pool.get_connection() as conn:
-            cursor = conn.execute(sql, params)
-            results = cursor.fetchall()
-            return [json.loads(row[0]) for row in results]
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA read_uncommitted = ON")  # Allow dirty reads for better concurrency
+            cursor.execute(sql, all_params)
+            
+            # Use optimized batch processing with larger batch size
+            return self._process_results(cursor, batch_size=10000)
+    
+    def _process_results(self, cursor: sqlite3.Cursor, batch_size: int = 10000) -> List[Dict[str, Any]]:
+        """Process results in efficient batches with minimal memory overhead."""
+        results = []
+        while True:
+            batch = cursor.fetchmany(batch_size)
+            if not batch:
+                break
+            # Use list comprehension for better performance
+            results.extend([json.loads(row[0]) for row in batch])
+        return results
+    
+    def _get_index_hint(self, collection: str, conditions: List[Tuple[str, QueryOperator, Any]]) -> str:
+        """Get the best index hint for the query."""
+        if not conditions:
+            return ""
+            
+        # Check available indexes
+        indexes = self.list_indexes(collection)
+        if not indexes:
+            return ""
+            
+        # Find the most suitable index based on query conditions
+        for index in indexes:
+            fields = json.loads(index['fields']) if isinstance(index['fields'], str) else index['fields']
+            if isinstance(fields, str):
+                fields = [fields]
+            
+            # Check if the first condition matches any indexed field
+            first_condition = conditions[0]
+            field_name = first_condition[0]
+            
+            # Skip CONTAINS operations for index hints as they use LIKE
+            if first_condition[1] == QueryOperator.CONTAINS:
+                continue
+                
+            if field_name in fields or any(field.startswith(f"{field_name}.") for field in fields):
+                # Verify the index exists in SQLite
+                with self.pool.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (index['name'],))
+                    if cursor.fetchone():
+                        return f"INDEXED BY {index['name']}"
+        
+        return ""
     
     def update(self, collection: str, query: Dict[str, Any], update: Dict[str, Any]) -> int:
         """Update documents matching query."""
