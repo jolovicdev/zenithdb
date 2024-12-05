@@ -1,0 +1,10 @@
+/venv
+/tests/__pycache__
+/benchmarks
+/zenithdb.egg-info
+/zenithdb/__pycache__
+/zenithdb/migrations/__pycache__
+/zenithdb/core/__pycache__
+.pytest_cache
+.coverage
+.pyproject.toml
