@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="zenithdb",
-    version="0.1.0",
+    version="0.1.1",
     author="jolovicdev",
     author_email="jolovic@pm.me",
     description="Pretty solid-performance document database with SQLite backend",
@@ -28,7 +28,9 @@ setup(
         "Topic :: Database :: Database Engines/Servers",
     ],
     python_requires=">=3.7",
-    install_requires=[],
+    install_requires=[
+        # Remove sqlite3 since it's part of standard library
+    ],
     extras_require={
         "dev": [
             "pytest>=7.0.0",
@@ -48,6 +50,6 @@ setup(
     project_urls={
         "Bug Reports": "https://github.com/jolovicdev/zenithdb/issues",
         "Source": "https://github.com/jolovicdev/zenithdb",
-        "Documentation": "https://github.com/jolovicdev/zenithdb/blob/main/README.md",
+        "Documentation": "https://github.com/jolovicdev/zenithdb/blob/master/README.md",
     },
 ) 
