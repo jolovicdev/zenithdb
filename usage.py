@@ -11,7 +11,7 @@ def main():
         os.remove("example.db")
 
     # Initialize database
-    db = Database("example.db")
+    db = Database("example.db",debug=False,max_connections=10,max_result_size=10000)
     users = db.collection("users")
     orders = db.collection("orders")
 

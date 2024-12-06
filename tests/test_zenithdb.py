@@ -284,7 +284,6 @@ def test_performance(users_collection):
     # Create indexes for query performance
     db = users_collection.database
     db.create_index("users", "age")
-    db.create_index("users", ["address.country", "age"])
 
     # Test query performance
     start_time = time.time()

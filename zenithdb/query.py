@@ -69,22 +69,31 @@ class Query:
     
     def __init__(self, collection: Optional[str] = None, database = None):
         """Initialize a new query."""
-        self.conditions: List[Tuple[str, QueryOperator, Any]] = []
         self.collection = collection
         self.database = database
+        self.conditions: List[Tuple[str, QueryOperator, Any]] = []
         self.sort_fields: List[Tuple[str, str]] = []
         self.limit_value: Optional[int] = None
         self.skip_value: Optional[int] = None
-        self._query_cache = {}  # Add query cache
+        self._query_cache = {}
     
-    def __getattr__(self, name: str) -> QueryField:
+    def __getattr__(self, name: str) -> 'QueryField':
         """Support for field access."""
         return QueryField(name, self)
     
     def where(self, field: str, operator: QueryOperator, value: Any) -> 'Query':
         """Add a where condition."""
+        # Check for duplicate conditions
+        for existing_field, existing_op, existing_value in self.conditions:
+            if existing_field == field and existing_op == operator:
+                # Skip duplicate condition
+                return self
         self.conditions.append((field, operator, value))
         return self
+    
+    def count(self) -> int:
+        """Count the number of documents matching the query."""
+        return len(self.execute())
     
     def sort(self, field: str, ascending: bool = True) -> 'Query':
         """Add sort criteria."""
@@ -105,7 +114,13 @@ class Query:
         """Combine two queries with AND."""
         if isinstance(other, Query):
             new_query = Query(self.collection, self.database)
-            new_query.conditions = self.conditions + other.conditions
+            # Deduplicate conditions when combining queries
+            seen_conditions = set()
+            for condition in self.conditions + other.conditions:
+                condition_key = (condition[0], condition[1])  # field and operator
+                if condition_key not in seen_conditions:
+                    seen_conditions.add(condition_key)
+                    new_query.conditions.append(condition)
             new_query.sort_fields = self.sort_fields
             new_query.limit_value = self.limit_value
             new_query.skip_value = self.skip_value
@@ -114,6 +129,9 @@ class Query:
     
     def execute(self) -> List[Dict[str, Any]]:
         """Execute the query with caching."""
+        if not self.collection or not self.database:
+            raise ValueError("Query must have collection and database set")
+        
         cache_key = self._generate_cache_key()
         if cache_key in self._query_cache:
             return self._query_cache[cache_key]

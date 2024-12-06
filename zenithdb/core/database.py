@@ -12,11 +12,12 @@ import hashlib
 class Database:
     """NoSQL-like database interface using SQLite as backend."""
     
-    def __init__(self, db_path: str, max_connections: int = 10, max_result_size: int = 10000):
+    def __init__(self, db_path: str, max_connections: int = 10, max_result_size: int = 10000, debug: bool = False):
         """Initialize database with connection pool."""
         self.db_path = db_path
         self.pool = ConnectionPool(db_path, max_connections)
         self.max_result_size = max_result_size
+        self.debug = debug
         self._init_db()
     
     def collection(self, name: str) -> Collection:
@@ -98,8 +99,11 @@ class Database:
                 ON documents({', '.join(['collection'] + field_exprs)})
                 WHERE collection = '{collection}'
             """
-            conn.execute(index_sql)
-            conn.commit()
+            conn.executescript(f"""
+                {index_sql};
+                ANALYZE;
+                ANALYZE {index_name};
+            """)
         
         return index_name
     
@@ -133,25 +137,68 @@ class Database:
             ops = BulkOperations(conn)
             return ops.bulk_insert(collection, [document], [doc_id] if doc_id else None)[0]
     
+    def check_index_usage(self, sql: str, params: List[Any] = None) -> bool:
+        """Check if a query is using indexes and print the execution plan."""
+        with self.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get the execution plan
+            cursor.execute(f"EXPLAIN QUERY PLAN {sql}", params or [])
+            plan = cursor.fetchall()
+            
+            # Parse the query plan
+            using_index = False
+            current_index = None
+            
+            for row in plan:
+                detail = row[3]
+                if "USING INDEX" in detail:
+                    # Extract index name and conditions
+                    parts = detail.split("USING INDEX")
+                    index_name = parts[1].split()[0]
+                    conditions = parts[1].split("(")[1].split(")")[0]
+                    
+                    # Check if it's using more than just the collection index
+                    if len(conditions.split("AND")) > 1:
+                        using_index = True
+                        current_index = index_name
+            
+            if self.debug:  # Only print if debug mode is enabled
+                if using_index:
+                    print(f"✓ Using index: {current_index}")
+                else:
+                    print("✗ No index used - table scan")
+            
+            return using_index
+    
     def execute_query(self, query: 'Query') -> List[Dict[str, Any]]:
         """Execute a query and return results with optimized execution."""
         conditions = []
         params = []
         
+        # Add collection condition first for better index usage
+        conditions.append("collection = ?")
+        params.append(query.collection)
+        
         for field, op, value in query.conditions:
             if value is None:
-                conditions.append(f"(json_extract(data, '$.{field}') IS NULL AND json_type(data, '$.{field}') IS NOT NULL)")
+                conditions.append("""(
+                    json_extract(data, ?) IS NULL 
+                    AND json_type(data, ?) IS NOT NULL
+                )""")
+                params.extend([f"$.{field}", f"$.{field}"])
                 continue
                 
             if op == QueryOperator.CONTAINS:
                 conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
                 params.append(f"%{value}%")
             elif op == QueryOperator.EQ:
-                if '.' in field:
-                    conditions.append(f"json_extract(data, '$.{field}') = ?")
+                if field == "_id":
+                    conditions.append("id = ?")
+                    params.append(value)
                 else:
                     conditions.append(f"json_extract(data, '$.{field}') = ?")
-                params.append(value)
+                    params.append(value)
             else:
                 op_map = {
                     QueryOperator.GT: ">",
@@ -163,34 +210,30 @@ class Database:
                 conditions.append(f"json_extract(data, '$.{field}') {op_map[op]} ?")
                 params.append(value)
         
-        where_clause = " AND ".join(conditions) if conditions else "1"
+        where_clause = " AND ".join(conditions)
+        limit_clause = f"LIMIT {query.limit_value}" if query.limit_value else "LIMIT 10000"
+        offset_clause = f"OFFSET {query.skip_value}" if query.skip_value else "OFFSET 0"
         
-        # Add pagination if not specified
-        if query.limit_value is None:
-            query.limit_value = self.max_result_size
-        if query.skip_value is None:
-            query.skip_value = 0
-            
-        # Use optimized query with MATERIALIZED optimization
         sql = f"""
-            WITH RECURSIVE
-            json_data AS MATERIALIZED (
-                SELECT data 
-                FROM documents
-                WHERE collection = ? AND {where_clause}
-                LIMIT ? OFFSET ?
-            )
-            SELECT * FROM json_data
+            SELECT data
+            FROM documents 
+            WHERE {where_clause}
+            {limit_clause} {offset_clause}
         """
         
-        all_params = [query.collection] + params + [query.limit_value, query.skip_value]
+        # Check and print index usage
+        self.check_index_usage(sql, params)
         
         with self.pool.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("PRAGMA read_uncommitted = ON")  # Allow dirty reads for better concurrency
-            cursor.execute(sql, all_params)
+            cursor.execute("PRAGMA read_uncommitted = ON")
+            try:
+                cursor.execute(sql, params)
+            except sqlite3.OperationalError as e:
+                if "no such index" not in str(e):
+                    raise
+                cursor.execute(sql, params)
             
-            # Use optimized batch processing with larger batch size
             return self._process_results(cursor, batch_size=10000)
     
     def _process_results(self, cursor: sqlite3.Cursor, batch_size: int = 10000) -> List[Dict[str, Any]]:
@@ -205,35 +248,42 @@ class Database:
         return results
     
     def _get_index_hint(self, collection: str, conditions: List[Tuple[str, QueryOperator, Any]]) -> str:
-        """Get the best index hint for the query."""
+        """Get the best index hint for the query based on available indexes."""
         if not conditions:
             return ""
             
-        # Check available indexes
+        # Get all available indexes for collection
         indexes = self.list_indexes(collection)
         if not indexes:
             return ""
-            
-        # Find the most suitable index based on query conditions
+        
+        # Extract fields from conditions
+        query_fields = [(field, op) for field, op, _ in conditions]
+        
+        # First try to find a perfect match for compound indexes
         for index in indexes:
-            fields = json.loads(index['fields']) if isinstance(index['fields'], str) else index['fields']
-            if isinstance(fields, str):
-                fields = [fields]
+            index_fields = json.loads(index['fields']) if isinstance(index['fields'], str) else index['fields']
+            if not isinstance(index_fields, list):
+                index_fields = [index_fields]
             
-            # Check if the first condition matches any indexed field
-            first_condition = conditions[0]
-            field_name = first_condition[0]
+            # Check if index fields match query fields prefix
+            if any(field == index_fields[0] for field, _ in query_fields):
+                return f"INDEXED BY {index['name']}"
+        
+        # If no perfect match, try to find an index that can help
+        for index in indexes:
+            index_fields = json.loads(index['fields']) if isinstance(index['fields'], str) else index['fields']
+            if not isinstance(index_fields, list):
+                index_fields = [index_fields]
             
-            # Skip CONTAINS operations for index hints as they use LIKE
-            if first_condition[1] == QueryOperator.CONTAINS:
-                continue
-                
-            if field_name in fields or any(field.startswith(f"{field_name}.") for field in fields):
-                # Verify the index exists in SQLite
-                with self.pool.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (index['name'],))
-                    if cursor.fetchone():
+            # Check if any query field uses this index
+            for query_field, op in query_fields:
+                if query_field in index_fields:
+                    # For range queries, only use if it's the first field
+                    if op in [QueryOperator.GT, QueryOperator.GTE, QueryOperator.LT, QueryOperator.LTE]:
+                        if query_field == index_fields[0]:
+                            return f"INDEXED BY {index['name']}"
+                    else:
                         return f"INDEXED BY {index['name']}"
         
         return ""

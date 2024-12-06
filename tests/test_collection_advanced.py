@@ -38,6 +38,33 @@ def test_document_validation(db):
             {"name": "Bob", "age": -5}
         ])
 
+def test_get_all(db):
+    users = db.collection("users")
+    for i in range(14):
+        users.insert({
+            "name": f"Alice Smith{i}",
+            "age": 20 + i,
+            "email": "alice@example.com",
+            "tags": ["customer"],
+            "address": {"city": "London", "country": "UK"}
+        })
+    assert len(users.all()) == 14
+    users.delete_many({})
+    assert len(users.all()) == 0
+
+def test_count_all(db):
+    users = db.collection("users")
+    for i in range(29):
+        users.insert({
+            "name": f"Alice Smith{i}",
+            "age": 20 + i,
+            "email": "alice@example.com",
+            "tags": ["customer"],
+            "address": {"city": "London", "country": "UK"}
+        })
+    assert users.count() == 29
+    users.delete_many({})
+    assert users.count() == 0
 def test_query_edge_cases(db):
     """Test edge cases in queries."""
     users = db.collection("users")
