@@ -154,27 +154,26 @@ class Database:
         """Initialize database with optimized settings."""
         with self.pool.get_connection() as conn:
             conn.executescript('''
-                PRAGMA journal_mode=WAL;
-                PRAGMA synchronous=NORMAL;
-                PRAGMA temp_store=MEMORY;
-                PRAGMA page_size=4096;
-                PRAGMA cache_size=-32000;  -- 128MB cache
-                PRAGMA auto_vacuum=NONE;
-                PRAGMA locking_mode=EXCLUSIVE;
-                PRAGMA busy_timeout=5000;
-                PRAGMA mmap_size=536870912;  -- 512MB memory mapping
-                PRAGMA journal_size_limit=67108864;  -- 64MB journal size limit
-                PRAGMA threads=4;  -- Use multiple threads
+                PRAGMA journal_mode=WAL;          -- WAL mode for concurrent reads and writes
+                PRAGMA synchronous=NORMAL;          -- Improves write performance
+                PRAGMA temp_store=MEMORY;        -- Keeps temp tables in memory
+                PRAGMA page_size=16384;          -- Larger pages reduce I/O
+                PRAGMA cache_size=-20000;        -- Approx 80MB cache for limited memory systems
+                PRAGMA auto_vacuum=NONE;         -- Disable auto vacuum to improve performance
+                PRAGMA locking_mode=NORMAL;      -- Avoid exclusive locks for concurrency
+                PRAGMA busy_timeout=10000;       -- 10s timeout for lock contention
+                PRAGMA mmap_size=268435456;      -- 256MB memory-mapped file access
+                PRAGMA journal_size_limit=67108864; -- Limit journal to 64MB
+                PRAGMA threads=4;                -- Utilize 4 threads for processing
             ''')
             conn.executescript('''
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS collections (
                     name TEXT PRIMARY KEY,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     metadata TEXT
                 );
-            ''')
-            conn.executescript('''
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
                     collection TEXT NOT NULL,
@@ -183,10 +182,8 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (collection) REFERENCES collections(name) ON DELETE CASCADE
                 );
-                
                 CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection) WHERE collection IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_collection_id ON documents(collection, id) WHERE collection IS NOT NULL;
-                
                 CREATE TABLE IF NOT EXISTS indexes (
                     name TEXT PRIMARY KEY,
                     collection TEXT NOT NULL,
@@ -195,6 +192,7 @@ class Database:
                     unique_index INTEGER NOT NULL,
                     FOREIGN KEY (collection) REFERENCES collections(name) ON DELETE CASCADE
                 );
+                COMMIT;
             ''')
     
     def create_index(self, collection: str, fields: Union[str, List[str]], 
@@ -264,8 +262,15 @@ class Database:
     def insert(self, collection: str, document: Dict[str, Any], doc_id: Optional[str] = None) -> str:
         """Insert a document into a collection."""
         with self.pool.get_connection() as conn:
-            ops = BulkOperations(conn)
-            return ops.bulk_insert(collection, [document], [doc_id] if doc_id else None)[0]
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                ops = BulkOperations(conn)
+                doc_id = ops.bulk_insert(collection, [document], [doc_id] if doc_id else None)[0]
+                conn.commit()
+                return doc_id
+            except Exception as e:
+                conn.rollback()
+                raise e
     
     def check_index_usage(self, sql: str, params: List[Any] = None) -> bool:
         """Check if a query is using indexes and print the execution plan."""

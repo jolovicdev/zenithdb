@@ -7,13 +7,17 @@ import os
 import time
 from zenithdb import Database, Query, AggregateFunction
 import sqlite3
-
+DB_PATH = "test_PRE.db"
 @pytest.fixture
 def db():
     """Create a test database."""
     db_path = "test.db"
     if os.path.exists(db_path):
         os.remove(db_path)
+    if os.path.exists(db_path + "-wal"):
+        os.remove(db_path + "-wal")
+    if os.path.exists(db_path + "-shm"):
+        os.remove(db_path + "-shm")
     db = Database(db_path)
     yield db
     # Cleanup after tests
@@ -323,3 +327,36 @@ def test_drop_collection(db):
     users.insert({"name":"Jim","age":22})
     db.drop_collection("users")
     assert db.list_collections() == []
+def test_create_and_insert():
+    # Ensure a clean start
+    if os.path.exists("DB_PATH"):
+        os.remove(DB_PATH)
+
+    db = Database(DB_PATH)
+    users = db.collection("users")
+    
+    user_id = users.insert({"name": "John Doe", "age": 30})
+    db.close()
+
+    # Don't remove the DB here; we want to test persistence in the next test.
+    # At this point, the database file (and WAL/SHM files) still exist on disk,
+    # simulating the program ending with data written.
+
+def test_read_after_reopen():
+    # Now simulate a "new run" of the program
+    # We expect the data inserted in the previous test to still be there
+    db = Database(DB_PATH)
+    users = db.collection("users")
+
+    found = users.find_one({"name": "John Doe"})
+    assert found is not None
+    assert found["age"] == 30
+
+    # Cleanup after the test if needed
+    db.close()
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+    if os.path.exists(DB_PATH + "-wal"):
+        os.remove(DB_PATH + "-wal")
+    if os.path.exists(DB_PATH + "-shm"):
+        os.remove(DB_PATH + "-shm")
