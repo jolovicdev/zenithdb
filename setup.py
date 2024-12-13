@@ -5,10 +5,10 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="zenithdb",
-    version="0.1.3",
+    version="1.0.0",
     author="jolovicdev",
     author_email="jolovic@pm.me",
-    description="Pretty solid-performance document database with SQLite backend",
+    description="SQLite-powered document database with MongoDB-like syntax, full-text search, and advanced querying capabilities",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/jolovicdev/zenithdb",
@@ -18,7 +18,7 @@ setup(
         "Intended Audience :: Developers",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3 :: Only",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
@@ -28,9 +28,7 @@ setup(
         "Topic :: Database :: Database Engines/Servers",
     ],
     python_requires=">=3.7",
-    install_requires=[
-        # Remove sqlite3 since it's part of standard library
-    ],
+    install_requires=[],
     extras_require={
         "dev": [
             "pytest>=7.0.0",

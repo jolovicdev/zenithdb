@@ -55,6 +55,12 @@ class BulkOperations:
     def bulk_insert(self, collection: str, documents: List[Dict[str, Any]], 
                    doc_ids: Optional[List[str]] = None) -> List[str]:
         """Insert multiple documents in a single transaction."""
+        if not documents:
+            return []
+        
+        # Calculate optimal batch size based on document characteristics
+        batch_size = self._calculate_optimal_batch_size(documents)
+        
         if doc_ids is None:
             doc_ids = [str(uuid.uuid4()) for _ in documents]
         elif len(doc_ids) != len(documents):
@@ -72,14 +78,14 @@ class BulkOperations:
             
             # Insert in batches
             total = len(documents)
-            for i in range(0, len(values), BATCH_SIZE):
-                batch = values[i:i + BATCH_SIZE]
+            for i in range(0, len(values), batch_size):
+                batch = values[i:i + batch_size]
                 cursor.executemany(
                     "INSERT INTO documents (id, collection, data) VALUES (?, ?, ?)",
                     batch
                 )
                 if self.progress_callback:
-                    self.progress_callback(min(i + BATCH_SIZE, total), total)
+                    self.progress_callback(min(i + batch_size, total), total)
             
             return doc_ids
         except Exception as e:
@@ -89,11 +95,15 @@ class BulkOperations:
     
     def bulk_update(self, collection: str, updates: List[Dict[str, Any]]):
         """Update multiple documents in a single transaction."""
+        if not updates:
+            return
+        
+        batch_size = self._calculate_optimal_batch_size(updates)
         cursor = self.connection.cursor()
         try:
             # Process updates in batches
-            for i in range(0, len(updates), BATCH_SIZE):
-                batch = updates[i:i + BATCH_SIZE]
+            for i in range(0, len(updates), batch_size):
+                batch = updates[i:i + batch_size]
                 for update in batch:
                     doc_id = update.pop('_id', None)
                     if doc_id:
@@ -114,11 +124,16 @@ class BulkOperations:
     
     def bulk_delete(self, collection: str, doc_ids: List[str]):
         """Delete multiple documents in a single transaction."""
+        if not doc_ids:
+            return
+        
+        # For deletes, use a simpler calculation since we're just dealing with IDs
+        batch_size = min(BATCH_SIZE, max(100, len(doc_ids) // 10))
         cursor = self.connection.cursor()
         try:
             # Delete in batches
-            for i in range(0, len(doc_ids), BATCH_SIZE):
-                batch = doc_ids[i:i + BATCH_SIZE]
+            for i in range(0, len(doc_ids), batch_size):
+                batch = doc_ids[i:i + batch_size]
                 placeholders = ','.join(['?' for _ in batch])
                 cursor.execute(
                     f"DELETE FROM documents WHERE id IN ({placeholders}) AND collection = ?",

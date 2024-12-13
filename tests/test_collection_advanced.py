@@ -105,3 +105,12 @@ def test_complex_updates(db):
     updated = users.find_one({"_id": user_id})
     assert updated["profile"]["age"] == 31
     assert updated["tags"][0] == "c"
+
+def test_full_text_search(db):
+    """Test full text search."""
+    users = db.collection("users")
+    users.insert({"name":"John Smith","age":30,"email":"john@example.com","tags":["customer","premium"]})
+    users.insert({"name":"Jane Doe","age":25,"email":"jane@example.com","tags":["customer","trial"]})
+    assert len(users.find({"*":{"$contains":"Smith"}})) == 1
+    assert len(users.find({"*":{"$contains":"Doe"}})) == 1
+    assert len(users.find({"*":{"$contains":"Smith Doe"}})) == 0

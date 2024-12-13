@@ -12,7 +12,40 @@ class Collection:
         self.database = database
         self.name = name
         self.validator = None
-        
+        self.__initiator()
+    
+    def __str__(self):
+        return self.name
+    
+    def __repr__(self):
+        return self.name
+    
+    def __initiator(self):
+        with self.database.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM collections WHERE name = ?", [self.name])
+            if cursor.fetchone() is None:
+                cursor.execute("INSERT INTO collections (name,metadata) VALUES (?,?)", 
+                             [self.name, "{\"validator\": null}"])
+                conn.commit()
+            else:
+                cursor.execute("UPDATE collections SET updated_at = CURRENT_TIMESTAMP WHERE name = ?", [self.name])
+                conn.commit()
+    def print_collection(self):
+        """Print a formatted view of the collection contents."""
+        print_dict = {}
+        with self.database.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM collections WHERE name = ?", [self.name])
+            metadata_row = cursor.fetchone()
+            print_dict["metadata"] = json.loads(metadata_row["metadata"])
+            print_dict["name"] = self.name
+            cursor.execute("SELECT * FROM documents WHERE collection = ?", [self.name])
+            print_dict["documents"] = [json.loads(i["data"]) for i in cursor.fetchall()]
+            cursor.execute("SELECT * FROM indexes WHERE collection = ?", [self.name])
+            print_dict["indexes"] = [json.loads(i["fields"]) for i in cursor.fetchall()]
+            print(json.dumps(print_dict, indent=4, ensure_ascii=False))
+            conn.commit()
     def set_validator(self, validator_func: Callable[[Dict[str, Any]], bool]):
         """Set document validator function."""
         self.validator = validator_func
@@ -40,12 +73,35 @@ class Collection:
             base_query = Query()
             base_query.collection = self.name
             base_query.database = self.database
-            
-            # Get available indexes for this collection
-            indexes = self.database.list_indexes(self.name)
-            
-            # Sort conditions to match compound indexes if possible
+
+            # Handle full text search query with "*" field
+            if len(query) == 1 and "*" in query and isinstance(query["*"], dict) and "$contains" in query["*"]:
+                search_term = query["*"]["$contains"]
+                # Get all documents first
+                all_docs = base_query.execute()
+                
+                def search_value(value: Any, term: str) -> bool:
+                    """Recursively search through any value type for the search term."""
+                    if isinstance(value, str):
+                        return term.lower() in value.lower()
+                    elif isinstance(value, (int, float)):
+                        return term.lower() in str(value).lower()
+                    elif isinstance(value, dict):
+                        return any(search_value(v, term) for v in value.values())
+                    elif isinstance(value, (list, tuple)):
+                        return any(search_value(item, term) for item in value)
+                    return False
+
+                # Filter documents that contain the search term anywhere in the document
+                results = [
+                    doc for doc in all_docs 
+                    if any(search_value(value, search_term) for value in doc.values())
+                ]
+                return results
+
+            # Regular query processing (your existing code)
             sorted_fields = []
+            indexes = self.database.list_indexes(self.name)
             for index in indexes:
                 index_fields = index['fields']
                 if isinstance(index_fields, str):
@@ -55,11 +111,9 @@ class Collection:
                         if field in query and field not in sorted_fields:
                             sorted_fields.append(field)
             
-            # Add remaining fields
             remaining_fields = [f for f in query.keys() if f not in sorted_fields]
             sorted_fields.extend(remaining_fields)
-            
-            # Build query with ordered conditions
+
             for field in sorted_fields:
                 value = query[field]
                 if isinstance(value, dict):
@@ -79,18 +133,16 @@ class Collection:
                             base_query.where(field, QueryOperator.IN, val)
                         elif op == "contains":
                             base_query.where(field, QueryOperator.CONTAINS, val)
-                        else:
-                            base_query.where(field, QueryOperator.EQ, val)
                 else:
                     base_query.where(field, QueryOperator.EQ, value)
             
             return base_query.execute()
+
         elif isinstance(query, Query):
             query.collection = self.name
             query.database = self.database
             return query.execute()
         else:
-            # Return all documents if no query provided
             base_query = Query()
             base_query.collection = self.name
             base_query.database = self.database

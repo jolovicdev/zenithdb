@@ -2,177 +2,251 @@
 ZenithDB Usage Example
 """
 
-import os
 from zenithdb import Database, Query, AggregateFunction
+import os
 
 def main():
     # Cleanup any existing database
     if os.path.exists("example.db"):
         os.remove("example.db")
 
-    # Initialize database
-    db = Database("example.db",debug=False,max_connections=10,max_result_size=10000)
+    print("\n=== Database Initialization ===")
+    # Initialize with performance settings
+    db = Database(
+        "example.db",
+        max_connections=10,  # Connection pool size
+        debug=True  # Enable query plan analysis
+    )
+
+    print("\n=== Collection Management ===")
     users = db.collection("users")
-    orders = db.collection("orders")
+    print(f"Collections count: {db.count_collections()}")
+    print(f"All collections: {db.list_collections()}")
 
-    print("\n" + "="*50)
-    print("Basic CRUD Operations")
-    print("="*50)
-
+    print("\n=== Indexing ===")
     # Create indexes for better performance
-    print("\nCreating Indexes...")
-    db.create_index("users", "age")
-    db.create_index("users", ["address.country", "age"])
-    db.create_index("users", "email", unique=True)
-    print("✓ Created indexes:", db.list_indexes("users"))
+    db.create_index("users", ["age"])
+    db.create_index("users", ["profile.location.country", "age"])
+    db.create_index("users", ["email"], unique=True)
+    print("Created indexes:", db.list_indexes("users"))
 
-    # Insert a user
-    user = {
-        "name": "John Doe",
-        "age": 30,
-        "email": "john@example.com",
-        "tags": ["customer", "premium"],
-        "address": {
-            "city": "San Francisco",
-            "country": "USA"
-        }
-    }
-    user_id = users.insert(user)
-    print("\n✓ Successfully inserted user:")
-    print(f"  ID: {user_id}")
+    print("\n=== Document Validation ===")
+    # Add validation for user documents
+    def age_validator(doc):
+        return isinstance(doc.get('age'), int) and doc['age'] >= 0
+    users.set_validator(age_validator)
+    print("Added age validator")
 
-    # Add more users for demonstrating queries
-    users.insert_many([
+    print("\n=== Document Insertion ===")
+    # Insert test data
+    test_users = [
+        {
+            "name": "John Doe",
+            "age": 30,
+            "email": "john@example.com",
+            "tags": ["premium", "tech"],
+            "profile": {
+                "location": {"city": "New York", "country": "USA"},
+                "interests": ["coding", "music"]
+            }
+        },
         {
             "name": "Alice Smith",
             "age": 25,
             "email": "alice@example.com",
-            "tags": ["customer"],
-            "address": {"city": "London", "country": "UK"}
+            "tags": ["basic"],
+            "profile": {
+                "location": {"city": "London", "country": "UK"},
+                "interests": ["art", "travel"]
+            }
         },
         {
-            "name": "Bob Johnson",
+            "name": "Bob Wilson",
             "age": 35,
             "email": "bob@example.com",
-            "tags": ["customer", "trial"],
-            "address": {"city": "Paris", "country": "France"}
-        },
-        {
-            "name": "Carol White",
-            "age": 28,
-            "email": "carol@example.com",
-            "tags": ["customer", "premium"],
-            "address": {"city": "New York", "country": "USA"}
+            "tags": ["premium", "finance"],
+            "profile": {
+                "location": {"city": "New York", "country": "USA"},
+                "interests": ["stocks", "sports"]
+            }
         }
-    ])
-
-    # Find with dict query
-    found_user = users.find_one({"_id": user_id})
-    print("\nLookup by ID:")
-    print(f"✓ Found user: {found_user['name']} ({found_user['email']})")
-
-    # Find with Query builder (using compound index)
-    q = Query()
-    found_user = users.find_one(
-        (q.age >= 25) & (q.age <= 35) & q.tags.contains("premium")
-    )
-    print("\nComplex Query Result:")
-    print(f"✓ Found user: {found_user['name']} ({found_user['email']})")
-
-    # Update user
-    update_result = users.update(
-        {"_id": user_id},
-        {"$set": {"age": 31, "tags": ["customer", "premium", "updated"]}}
-    )
-    print("\nUpdate Operation:")
-    print(f"✓ Success: {update_result}")
-    updated_user = users.find_one({"_id": user_id})
-    print(f"✓ Updated user data: {updated_user['name']}, Age: {updated_user['age']}, Tags: {updated_user['tags']}")
-
-    print("\n" + "="*50)
-    print("Complex Queries")
-    print("="*50)
+    ]
     
-    # Query using index on age
-    print("\nUsers aged 25-35 with premium tag (dict query):")
-    premium_users = users.find({
-        "age": {"$gte": 25, "$lte": 35},
-        "tags": {"$contains": "premium"}
+    # Single insert
+    user_id = users.insert(test_users[0])
+    print(f"Inserted single user with ID: {user_id}")
+    
+    # Bulk insert
+    users.insert_many(test_users[1:])
+    print(f"Inserted {len(test_users)-1} more users")
+
+    print("\n=== Query Styles ===")
+    print("1. Find One:")
+    user = users.find_one({"name": "John Doe"})
+    print(f"Found user: {user['name']}")
+
+    print("\n2. Dictionary Style Queries:")
+    # All comparison operators
+    results = users.find({
+        "age": {"$gt": 25, "$lte": 35},  # Greater than, Less than or equal
+        "tags": {"$contains": "premium"},  # Array contains
+        "profile.location.city": "New York",  # Nested field
+        "name": {"$ne": "Alice Smith"}  # Not equal
     })
-    for user in premium_users:
-        print(f"✓ {user['name']:<15} | Age: {user['age']:<3} | {user['email']}")
+    print("Users matching complex criteria:")
+    for user in results:
+        print(f"- {user['name']}, {user['age']}")
 
-    # Same query with Query builder
-    print("\nUsers aged 25-35 with premium tag (Query builder):")
+    print("\n3. Query Builder Style:")
     q = Query()
-    premium_users = users.find(
-        (q.age >= 25) & (q.age <= 35) & q.tags.contains("premium")
+    results = users.find(
+        (q.age > 25) &
+        (q.age <= 35) &
+        q.tags.contains("premium") &
+        (q.profile.location.city == "New York")
     )
-    for user in premium_users:
-        print(f"✓ {user['name']:<15} | Age: {user['age']:<3} | {user['email']}")
+    print("Same query with Query builder:")
+    for user in results:
+        print(f"- {user['name']}, {user['age']}")
 
-    print("\n" + "="*50)
-    print("Aggregations")
-    print("="*50)
+    print("\n4. Pagination and Sorting:")
+    # Create query with sorting and pagination
+    q = Query(collection="users", database=db)
+    q.sort("age", ascending=False)  # Sort by age descending
+    q.sort("name", ascending=True)  # Then by name ascending
+    q.limit(2)  # Get 2 users per page
+    q.skip(1)   # Skip first user
     
-    # Calculate average age
-    avg_age = users.aggregate([{
-        "group": {
-            "field": None,
-            "function": AggregateFunction.AVG,
-            "target": "age",
-            "alias": "avg_age"
-        }
-    }])
-    print(f"\n✓ Average user age: {avg_age[0]['avg_age']:.1f} years")
+    paginated = q.execute()
+    print("Paginated results (page 1, 2 users):")
+    for user in paginated:
+        print(f"- {user['name']}, {user['age']}")
 
-    # Count users by country (using compound index)
-    print("\nUser distribution by country:")
-    country_counts = users.aggregate([{
-        "group": {
-            "field": "address.country",
-            "function": AggregateFunction.COUNT,
-            "alias": "count"
-        }
-    }])
-    for country in ["France", "UK", "USA"]:
-        count = next((c["count"] for c in country_counts 
-                     if c["address.country"] == country), 0)
-        print(f"✓ {country:<6}: {count} users")
+    print("\n5. Full-text Search:")
+    results = users.find({"*": {"$contains": "tech"}})
+    print("Users with 'tech' anywhere in their document:")
+    for user in results:
+        print(f"- {user['name']}")
 
-    print("\n" + "="*50)
-    print("Relationships")
-    print("="*50)
-    
-    # Add some orders
+    print("\n6. Array Operations:")
+    results = users.find({
+        "tags": {"$contains": "premium"},
+        "profile.interests": {"$contains": "coding"}
+    })
+    print("Users with specific array values:")
+    for user in results:
+        print(f"- {user['name']}: {user['tags']}")
+
+    print("\n=== Relationships ===")
+    # Create orders collection
+    orders = db.collection("orders")
+    db.create_index("orders", ["user_id"])  # Index for better join performance
+
+    # Add orders for a user
     orders.insert_many([
-        {
-            "user_id": user_id,
-            "product": "Mouse",
-            "price": 25.00,
-            "status": "pending"
-        },
         {
             "user_id": user_id,
             "product": "Laptop",
             "price": 1200.00,
             "status": "completed"
+        },
+        {
+            "user_id": user_id,
+            "product": "Mouse",
+            "price": 25.00,
+            "status": "pending"
         }
     ])
 
-    # Find orders for user (create index for better performance)
-    db.create_index("orders", "user_id")
-    print(f"\nOrders for user: {found_user['name']}")
+    # Find user's orders
     user_orders = orders.find({"user_id": user_id})
+    print(f"\nOrders for user {user_id}:")
     for order in user_orders:
-        print(f"✓ {order['product']:<10} | ${order['price']:<8.2f} | Status: {order['status']}")
+        print(f"- {order['product']}: ${order['price']}, Status: {order['status']}")
 
-    print("\n" + "="*50)
-    print("Cleanup")
-    print("="*50)
+    print("\n=== Aggregations ===")
+    # Multiple aggregation examples
+    agg_result = users.aggregate([{
+        "group": {
+            "field": "profile.location.country",
+            "function": AggregateFunction.AVG,
+            "target": "age",
+            "alias": "avg_age"
+        }
+    }])
+    print("\nAverage age by country:")
+    for result in agg_result:
+        print(f"- {result['profile.location.country']}: {result['avg_age']:.1f}")
+
+    # Count by multiple fields
+    count_result = users.aggregate([{
+        "group": {
+            "field": "profile.location.country",
+            "function": AggregateFunction.COUNT,
+            "alias": "user_count"
+        }
+    }])
+    print("\nUsers per country:")
+    for result in count_result:
+        print(f"- {result['profile.location.country']}: {result['user_count']}")
+
+    print("\n=== Collection Operations ===")
+    print("Collection contents:")
+    users.print_collection()
+    print(f"\nTotal documents: {users.count()}")
+    print(f"Filtered count: {users.count({'age': {'$gt': 30}})}")
+
+    print("\n=== Bulk Operations ===")
+    bulk_ops = users.bulk_operations()
+    
+    # Bulk insert
+    new_users = [
+        {
+            "name": "User1",
+            "age": 31,
+            "email": "user1@example.com",
+            "tags": ["new"],
+            "profile": {"location": {"city": "Boston", "country": "USA"}}
+        },
+        {
+            "name": "User2",
+            "age": 32,
+            "email": "user2@example.com",
+            "tags": ["new"],
+            "profile": {"location": {"city": "Chicago", "country": "USA"}}
+        }
+    ]
+    inserted_ids = bulk_ops.bulk_insert("users", new_users)
+    print(f"Bulk inserted {len(inserted_ids)} users")
+
+    # Bulk update
+    updates = [
+        {"_id": inserted_ids[0], "status": "active"},
+        {"_id": inserted_ids[1], "status": "active"}
+    ]
+    bulk_ops.bulk_update("users", updates)
+    print("Bulk updated user statuses")
+
+    # Bulk delete
+    bulk_ops.bulk_delete("users", inserted_ids)
+    print("Bulk deleted users")
+
+    print("\n=== Cleanup ===")
+    # Drop specific collection
+    db.drop_collection("orders")
+    print("Dropped orders collection")
+
+    # Drop all collections
+    db.drop_all_collections()
+    print("Dropped all collections")
+
+    # Drop specific index
+    db.drop_index("idx_users_email")
+    print("Dropped email index")
+
     db.close()
     os.remove("example.db")
-    print("✓ Database cleaned up successfully")
+    print("Cleanup complete")
 
 if __name__ == "__main__":
     main() 

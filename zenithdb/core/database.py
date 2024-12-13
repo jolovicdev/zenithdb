@@ -19,11 +19,132 @@ class Database:
         self.max_result_size = max_result_size
         self.debug = debug
         self._init_db()
+        self._collections: Dict[str, Collection] = {}
     
     def collection(self, name: str) -> Collection:
-        """Get a collection interface."""
-        return Collection(self, name)
+        """
+        Get or create a collection interface.
+        Returns cached collection instance if it exists, otherwise creates new one.
+        """
+        if name not in self._collections:
+            self._collections[name] = Collection(self, name)
+        return self._collections[name]
     
+    def list_collections(self) -> List[str]:
+        """Get list of all collection names in the database."""
+        with self.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT name FROM collections ORDER BY name")
+            return sorted([row[0] for row in cursor.fetchall()])
+
+    def count_collections(self) -> int:
+        """Get count of all collections in the database."""
+        with self.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM collections")
+            return cursor.fetchone()[0]
+
+    def drop_all_collections(self) -> None:
+        """Drop all collections in the database."""
+        with self.pool.get_connection() as conn:
+            conn.execute("DELETE FROM collections")
+            conn.execute("DELETE FROM documents")
+            conn.execute("DELETE FROM indexes")
+            conn.commit()
+    
+    def drop_collection(self, name: str) -> None:
+        """
+        Drop a collection and all its documents.
+        Also removes any associated indexes.
+        """
+        with self.pool.get_connection() as conn:
+            # Delete collection metadata
+            conn.execute("DELETE FROM collections WHERE name = ?", [name])
+            
+            # Delete all documents in collection
+            conn.execute("DELETE FROM documents WHERE collection = ?", [name])
+            
+            # Delete associated indexes
+            indexes = self.list_indexes(name)
+            for index in indexes:
+                self.drop_index(index['name'])
+            
+            # Remove from cache
+            if name in self._collections:
+                try:
+                    del self._collections[name]
+                except KeyError:
+                    # Collection not found in cache, ignore
+                    pass
+            
+            conn.commit()
+
+    def print_everything(self) -> List[Dict]:
+        """Print and return all database contents in a readable format."""
+        results = {
+            'collections': [],
+            'documents': [],
+            'indexes': []
+        }
+        
+        with self.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get collections
+            cursor.execute("SELECT name, created_at, updated_at, metadata FROM collections")
+            collections = [
+                {
+                    'name': row[0],
+                    'created_at': row[1],
+                    'updated_at': row[2],
+                    'metadata': json.loads(row[3]) if row[3] else None
+                }
+                for row in cursor.fetchall()
+            ]
+            results['collections'] = collections
+            print("\nCollections:")
+            for col in collections:
+                print(f"  - {col['name']} (created: {col['created_at']})")
+            
+            # Get documents
+            cursor.execute("SELECT collection, id, data, created_at, updated_at FROM documents")
+            documents = [
+                {
+                    'collection': row[0],
+                    'id': row[1],
+                    'data': json.loads(row[2]),
+                    'created_at': row[3],
+                    'updated_at': row[4]
+                }
+                for row in cursor.fetchall()
+            ]
+            results['documents'] = documents
+            print("\nDocuments:")
+            for doc in documents:
+                print(f"  - [{doc['collection']}] {doc['id']}: {json.dumps(doc['data'], indent=2)[:100]}...")
+            
+            # Get indexes
+            cursor.execute("SELECT name, collection, fields, type, unique_index FROM indexes")
+            indexes = [
+                {
+                    'name': row[0],
+                    'collection': row[1],
+                    'fields': json.loads(row[2]),
+                    'type': row[3],
+                    'unique': bool(row[4])
+                }
+                for row in cursor.fetchall()
+            ]
+            results['indexes'] = indexes
+            print("\nIndexes:")
+            for idx in indexes:
+                unique_str = " (unique)" if idx['unique'] else ""
+                print(f"  - {idx['name']}: {idx['collection']}.{idx['fields']}{unique_str}")
+            
+            conn.commit()
+            
+        return results
+
     def bulk_operations(self) -> BulkOperations:
         """Get bulk operations interface."""
         with self.pool.get_connection() as conn:
@@ -45,14 +166,22 @@ class Database:
                 PRAGMA journal_size_limit=67108864;  -- 64MB journal size limit
                 PRAGMA threads=4;  -- Use multiple threads
             ''')
-            
+            conn.executescript('''
+                CREATE TABLE IF NOT EXISTS collections (
+                    name TEXT PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    metadata TEXT
+                );
+            ''')
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
                     collection TEXT NOT NULL,
                     data TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (collection) REFERENCES collections(name) ON DELETE CASCADE
                 );
                 
                 CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection) WHERE collection IS NOT NULL;
@@ -63,7 +192,8 @@ class Database:
                     collection TEXT NOT NULL,
                     fields TEXT NOT NULL,
                     type TEXT NOT NULL,
-                    unique_index INTEGER NOT NULL
+                    unique_index INTEGER NOT NULL,
+                    FOREIGN KEY (collection) REFERENCES collections(name) ON DELETE CASCADE
                 );
             ''')
     

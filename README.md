@@ -1,17 +1,18 @@
 # ZenithDB
 
-ZenithDB is a powerful and flexible document-oriented database implemented in Python, offering MongoDB-like functionality with a clean and intuitive API. ZenithDB is built on top of SQLite.
+SQLite-powered document database with MongoDB-like syntax, full-text search, and advanced querying capabilities.
+For complete examples of all features, PLEASE check out [usage.py](usage.py).
 
 ## Features
 
-- **Document-Oriented Storage**: Store and manage JSON-like documents with nested structures
-- **Powerful Querying**: Support for both dictionary-style queries and a fluent Query builder
-- **Indexing**: Create single and compound indexes for optimized query performance
-- **Unique Constraints**: Enforce uniqueness on specific fields
-- **Complex Queries**: Support for range queries, array operations, and nested field access
-- **Aggregation**: Perform grouping and aggregation operations
-- **Relationships**: Manage relationships between collections
-- **CRUD Operations**: Full support for Create, Read, Update, and Delete operations
+- **Document Storage & Validation**: Store and validate JSON-like documents with nested structures
+- **Advanced Querying**: Full-text search, nested field queries, array operations
+- **Multiple Query Styles**: Support for both MongoDB-style dict queries and fluent Query builder
+- **Indexing**: Single and compound indexes for optimized performance
+- **Aggregations**: Group and aggregate data with functions like COUNT, AVG, SUM
+- **Bulk Operations**: Efficient batch processing with transaction support
+- **Connection Pooling**: Built-in connection pool for concurrent operations
+- **Migration Support**: Versioned database migrations with up/down functions
 
 ## Installation
 
@@ -22,90 +23,116 @@ pip install zenithdb
 ## Quick Start
 
 ```python
-from zenithdb import Database, Query
+from zenithdb import Database
 
 # Initialize database
-db = Database("mydb.db")
+db = Database("myapp.db")
 users = db.collection("users")
 
-# Create indexes
-db.create_index("users", "age")
-db.create_index("users", "email", unique=True)
+# Add document validation
+def age_validator(doc):
+    return isinstance(doc.get('age'), int) and doc['age'] >= 0
+users.set_validator(age_validator)
 
-# Insert data
-user = {
+# Insert documents
+users.insert({
     "name": "John Doe",
     "age": 30,
-    "email": "john@example.com",
-    "tags": ["customer", "premium"]
-}
-user_id = users.insert(user)
+    "tags": ["premium"],
+    "profile": {"city": "New York"}
+})
 
-# Query data
-q = Query()
-premium_users = users.find(
-    (q.age >= 25) & (q.age <= 35) & q.tags.contains("premium")
-)
-```
-
-## Advanced Usage
-
-Check out [usage.py](usage.py) for a complete example demonstrating:
-- Index creation and management
-- Complex queries using both dict and Query builder syntax
-- Aggregation operations
-- Relationship handling between collections
-- Batch operations
-- And more!
-
-## Query Examples
-
-### Dictionary Style
-```python
+# Query documents
 users.find({
-    "age": {"$gte": 25, "$lte": 35},
+    "age": {"$gt": 25},
     "tags": {"$contains": "premium"}
 })
-```
 
-### Query Builder Style
-```python
-q = Query()
-users.find((q.age >= 25) & (q.age <= 35) & q.tags.contains("premium"))
-```
+# Full-text search
+users.find({"*": {"$contains": "John"}})
 
-## Aggregations
+# Nested updates
+users.update(
+    {"name": "John Doe"},
+    {"$set": {
+        "profile.city": "Brooklyn",
+        "tags.0": "vip"
+    }}
+)
 
-```python
-from zenithdb import AggregateFunction
-
-# Calculate average age
-avg_age = users.aggregate([{
+# Aggregations
+users.aggregate([{
     "group": {
-        "field": None,
-        "function": AggregateFunction.AVG,
-        "target": "age",
-        "alias": "avg_age"
-    }
-}])
-
-# Count by country
-country_counts = users.aggregate([{
-    "group": {
-        "field": "address.country",
-        "function": AggregateFunction.COUNT,
+        "field": "profile.city",
+        "function": "COUNT",
         "alias": "count"
     }
 }])
 ```
 
-## Best Practices
+## Collection Management
 
-1. Create indexes for frequently queried fields
-2. Use compound indexes for multi-field queries
-3. Add unique constraints where appropriate
-4. Close the database connection when done
-5. Use the Query builder for complex queries for better readability
+```python
+# List and count collections
+db.list_collections()
+db.count_collections()
 
-Note - **I don't advice using this in production (or anything serious).**
-I made this to avoid writing raw SQL queries for my own personal projects.
+# Drop collections
+db.drop_collection("users")
+db.drop_all_collections()
+
+# Print collection contents
+users.print_collection()
+users.count()
+```
+
+## Advanced Features
+
+### Indexing
+```python
+# Create indexes
+db.create_index("users", ["email"])
+db.create_index("users", ["profile.city", "age"])
+
+# List indexes
+db.list_indexes("users")
+```
+
+### Bulk Operations
+```python
+bulk_ops = users.bulk_operations()
+with bulk_ops.transaction():
+    bulk_ops.bulk_insert("users", [
+        {"name": "User1", "age": 31},
+        {"name": "User2", "age": 32}
+    ])
+```
+
+### Migrations
+```python
+from zenithdb.migrations import MigrationManager
+
+manager = MigrationManager(db)
+migration = {
+    'version': '001',
+    'name': 'add_users',
+    'up': lambda: db.collection('users').insert({'admin': True}),
+    'down': lambda: db.collection('users').delete({})
+}
+manager.apply_migration(migration)
+```
+
+## Development
+
+```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/
+pytest tests/test_migrations.py
+pytest --cov=zenithdb tests/
+```
+
+For complete examples of all features, check out [usage.py](usage.py).
+I would not recommend using this as a production database, but it's a fun project to play around with.

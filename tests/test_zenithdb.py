@@ -307,3 +307,19 @@ def test_performance(users_collection):
     agg_time = time.time() - start_time
     assert agg_time < 0.1, "Aggregation took too long"
     
+def test_drop_all_collections(db):
+    """Test dropping all collections."""
+    users = db.collection("users")
+    users.insert({"name":"John","age":20})
+    users.insert({"name":"Jane","age":21})
+    users.insert({"name":"Jim","age":22})
+    db.drop_all_collections()
+    assert db.list_collections() == []
+def test_drop_collection(db):
+    """Test dropping a collection."""
+    users = db.collection("users")
+    users.insert({"name":"John","age":20})
+    users.insert({"name":"Jane","age":21})
+    users.insert({"name":"Jim","age":22})
+    db.drop_collection("users")
+    assert db.list_collections() == []
