@@ -6,19 +6,33 @@ from .collection import Collection
 from ..query import Query, QueryOperator
 from ..operations import BulkOperations
 from ..aggregations import Aggregations, AggregateFunction
-import functools
-import hashlib
+from .emitter import Emitter
+def emits(event_name: str):
+    def decorator(func):
+        def wrapper(self, *args, **kwargs):
+            result = func(self, *args, **kwargs)
+            if getattr(self, 'emitter', None) and self.emitter.has_subscribers():
+                self.emitter.emit(event_name, {
+                    'method': func.__name__,
+                    'args': args,
+                    'kwargs': kwargs,
+                    'result': result
+                })
+            return result
+        return wrapper
+    return decorator
 
 class Database:
     """NoSQL-like database interface using SQLite as backend."""
     
-    def __init__(self, db_path: str, max_connections: int = 10, max_result_size: int = 10000, debug: bool = False):
+    def __init__(self, db_path: str, max_connections: int = 10, max_result_size: int = 10000, debug: bool = False,emitter: Optional[Emitter] = None):
         """Initialize database with connection pool."""
         self.db_path = db_path
         self.pool = ConnectionPool(db_path, max_connections)
         self.max_result_size = max_result_size
         self.debug = debug
         self._init_db()
+        self.emitter = emitter
         self._collections: Dict[str, Collection] = {}
     
     def collection(self, name: str) -> Collection:
@@ -258,7 +272,7 @@ class Database:
             conn.execute(f"DROP INDEX IF EXISTS {index_name}")
             conn.execute("DELETE FROM indexes WHERE name = ?", [index_name])
             conn.commit()
-    
+    @emits('insert')
     def insert(self, collection: str, document: Dict[str, Any], doc_id: Optional[str] = None) -> str:
         """Insert a document into a collection."""
         with self.pool.get_connection() as conn:
