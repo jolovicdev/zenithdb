@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="zenithdb",
-    version="1.0.0",
+    version="1.0.1",
     author="jolovicdev",
     author_email="jolovic@pm.me",
     description="SQLite-powered document database with MongoDB-like syntax, full-text search, and advanced querying capabilities",
