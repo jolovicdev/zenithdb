@@ -1,17 +1,21 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = [
+    "setuptools>=61.0.0",
+    "wheel>=0.37.0"
+]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v --cov=zenithdb"
+addopts = "-v --cov=zenithdb --cov-report=xml --cov-report=term-missing"
 
 [tool.black]
 line-length = 88
-target-version = ['py37']
+target-version = ['py37', 'py38', 'py39', 'py310', 'py311']  # Support all versions
 include = '\.pyi?$'
 
 [tool.isort]
 profile = "black"
-multi_line_output = 3 
+multi_line_output = 3
+known_first_party = ["zenithdb"]  # Add your package name

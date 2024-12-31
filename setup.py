@@ -5,14 +5,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="zenithdb",
-    version="1.0.1",
+    version="1.0.2",
     author="jolovicdev",
     author_email="jolovic@pm.me",
     description="SQLite-powered document database with MongoDB-like syntax, full-text search, and advanced querying capabilities",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/jolovicdev/zenithdb",
-    packages=find_packages(),
+    packages=find_packages(exclude=["tests*", "docs*"]),  # Exclude test files from distribution
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
@@ -28,13 +28,16 @@ setup(
         "Topic :: Database :: Database Engines/Servers",
     ],
     python_requires=">=3.7",
-    install_requires=[],
     extras_require={
         "dev": [
-            "pytest>=7.0.0",
-            "pytest-cov>=4.0.0",
-            "black>=22.0.0",
-            "isort>=5.0.0",
+            "pytest>=7.0.0,<8.0.0",
+            "pytest-cov>=4.0.0,<5.0.0",
+            "black>=22.0.0,<23.0.0",
+            "isort>=5.0.0,<6.0.0",
+        ],
+        "docs": [
+            "sphinx>=4.0.0,<5.0.0",
+            "sphinx-rtd-theme>=1.0.0,<2.0.0",
         ],
     },
     keywords=[
@@ -50,4 +53,7 @@ setup(
         "Source": "https://github.com/jolovicdev/zenithdb",
         "Documentation": "https://github.com/jolovicdev/zenithdb/blob/master/README.md",
     },
-) 
+    package_data={
+        "zenithdb": ["py.typed", "*.pyi", "**/*.pyi"],  # Include type hints
+    },
+)

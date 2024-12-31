@@ -15,7 +15,10 @@ class Database:
     def __init__(self, db_path: str, max_connections: int = 10, max_result_size: int = 10000, debug: bool = False):
         """Initialize database with connection pool."""
         self.db_path = db_path
-        self.pool = ConnectionPool(db_path, max_connections)
+        try:
+            self.pool = ConnectionPool(db_path, max_connections)
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to initialize database connection pool: {e}")
         self.max_result_size = max_result_size
         self.debug = debug
         self._init_db()
@@ -150,90 +153,99 @@ class Database:
         with self.pool.get_connection() as conn:
             return BulkOperations(conn)
     
-    def _init_db(self):
-        """Initialize database with optimized settings."""
+    def _init_db(self) -> None:
+        """Initialize database schema with proper transaction handling."""
         with self.pool.get_connection() as conn:
-            conn.executescript('''
-                PRAGMA journal_mode=WAL;          -- WAL mode for concurrent reads and writes
-                PRAGMA synchronous=NORMAL;          -- Improves write performance
-                PRAGMA temp_store=MEMORY;        -- Keeps temp tables in memory
-                PRAGMA page_size=16384;          -- Larger pages reduce I/O
-                PRAGMA cache_size=-20000;        -- Approx 80MB cache for limited memory systems
-                PRAGMA auto_vacuum=NONE;         -- Disable auto vacuum to improve performance
-                PRAGMA locking_mode=NORMAL;      -- Avoid exclusive locks for concurrency
-                PRAGMA busy_timeout=10000;       -- 10s timeout for lock contention
-                PRAGMA mmap_size=268435456;      -- 256MB memory-mapped file access
-                PRAGMA journal_size_limit=67108864; -- Limit journal to 64MB
-                PRAGMA threads=4;                -- Utilize 4 threads for processing
-            ''')
-            conn.executescript('''
-                BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS collections (
-                    name TEXT PRIMARY KEY,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    metadata TEXT
-                );
-                CREATE TABLE IF NOT EXISTS documents (
-                    id TEXT PRIMARY KEY,
-                    collection TEXT NOT NULL,
-                    data TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (collection) REFERENCES collections(name) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection) WHERE collection IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_collection_id ON documents(collection, id) WHERE collection IS NOT NULL;
-                CREATE TABLE IF NOT EXISTS indexes (
-                    name TEXT PRIMARY KEY,
-                    collection TEXT NOT NULL,
-                    fields TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    unique_index INTEGER NOT NULL,
-                    FOREIGN KEY (collection) REFERENCES collections(name) ON DELETE CASCADE
-                );
-                COMMIT;
-            ''')
+            try:
+                # Set PRAGMA settings outside transaction
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                
+                # Create schema in transaction
+                conn.execute("BEGIN")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS collections (
+                        name TEXT PRIMARY KEY,
+                        metadata TEXT DEFAULT '{}',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS documents (
+                        id TEXT PRIMARY KEY,
+                        collection TEXT,
+                        data TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (collection) REFERENCES collections(name)
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS indexes (
+                        name TEXT PRIMARY KEY,
+                        collection TEXT NOT NULL,
+                        fields TEXT NOT NULL,
+                        type TEXT NOT NULL DEFAULT 'btree',
+                        unique_index INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (collection) REFERENCES collections(name)
+                    )
+                """)
+                # Create helpful indexes for better performance
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collection_id ON documents(collection, id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_indexes_collection ON indexes(collection)")
+                conn.commit()
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to initialize database schema: {e}")
     
     def create_index(self, collection: str, fields: Union[str, List[str]], 
                     index_type: str = "btree", unique: bool = False) -> str:
         """Create an index on specified fields."""
         if isinstance(fields, str):
             fields = [fields]
-            
+        
         # Generate index name
         safe_fields = [field.replace('.', '_') for field in fields]
         index_name = f"idx_{collection}_{'_'.join(safe_fields)}"
         
         with self.pool.get_connection() as conn:
-            # Store index metadata
-            conn.execute(
-                "INSERT OR REPLACE INTO indexes VALUES (?, ?, ?, ?, ?)",
-                (index_name, collection, json.dumps(fields), index_type, int(unique))
-            )
-            
-            # Create the actual index
-            field_exprs = []
-            for field in fields:
-                if '.' in field:
-                    parts = field.split('.')
-                    expr = f"json_extract(data, '$.{'.'.join(parts)}')"
-                else:
-                    expr = f"json_extract(data, '$.{field}')"
-                field_exprs.append(expr)
-            
-            index_sql = f"""
-                CREATE {'UNIQUE' if unique else ''} INDEX IF NOT EXISTS {index_name}
-                ON documents({', '.join(['collection'] + field_exprs)})
-                WHERE collection = '{collection}'
-            """
-            conn.executescript(f"""
-                {index_sql};
-                ANALYZE;
-                ANALYZE {index_name};
-            """)
-        
-        return index_name
+            try:
+                conn.execute("BEGIN")
+                
+                # Store index metadata
+                conn.execute("""
+                    INSERT OR REPLACE INTO indexes 
+                    (name, collection, fields, type, unique_index, created_at) 
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (index_name, collection, json.dumps(fields), index_type, int(unique)))
+                
+                # Create the actual SQLite index
+                field_exprs = []
+                for field in fields:
+                    if '.' in field:
+                        # Handle nested fields
+                        expr = f"json_extract(data, '$.{field}')"
+                    else:
+                        expr = f"json_extract(data, '$.{field}')"
+                    field_exprs.append(expr)
+                
+                # Create index with uniqueness constraint if specified
+                # Note: Collection name is hardcoded in WHERE clause since SQLite doesn't allow parameters there
+                index_sql = f"""
+                    CREATE {'UNIQUE' if unique else ''} INDEX IF NOT EXISTS {index_name}
+                    ON documents({', '.join(['collection'] + field_exprs)})
+                    WHERE collection = '{collection}'
+                """
+                conn.execute(index_sql)
+                conn.commit()
+                return index_name
+                
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise  # Re-raise the original error to preserve error type
     
     def list_indexes(self, collection: str = None) -> List[Dict[str, Any]]:
         """List all indexes or indexes for a specific collection."""
@@ -443,15 +455,9 @@ class Database:
                             where_conditions.append(f"json_extract(data, '$.{field}') {op_map[op]} ?")
                             params.append(json.dumps(val) if isinstance(val, str) else val)
                         elif op == "in":
-                            if '.' in field:
-                                # Handle nested fields
-                                placeholders = ','.join(['?' for _ in val])
-                                where_conditions.append(f"json_extract(data, '$.{field}') IN ({placeholders})")
-                                params.extend([json.dumps(v) if isinstance(v, str) else v for v in val])
-                            else:
-                                # Handle array fields
-                                where_conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
-                                params.append(f'%{json.dumps(val[0])[1:-1]}%')
+                            placeholders = ','.join(['?' for _ in val])
+                            where_conditions.append(f"json_extract(data, '$.{field}') IN ({placeholders})")
+                            params.extend([json.dumps(v) if isinstance(v, str) else v for v in val])
                         elif op == "contains":
                             where_conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
                             params.append(f'%{json.dumps(val)[1:-1]}%')
@@ -461,7 +467,7 @@ class Database:
                         where_conditions.append(f"json_extract(data, '$.{field}') = ?")
                         params.append(json.dumps(value) if isinstance(value, str) else value)
                     else:
-                        # Handle array fields and regular fields
+                        # Handle regular fields
                         where_conditions.append(f"json_extract(data, '$.{field}') = ?")
                         params.append(json.dumps(value) if isinstance(value, str) else value)
             
@@ -564,6 +570,13 @@ class Database:
         except sqlite3.Error:
             return False
     
+    def list_collections(self) -> list[Collection]:
+        """Get list of all collection names in the database."""
+        with self.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT name FROM collections ORDER BY name")
+            return sorted([row[0] for row in cursor.fetchall()])
+
     def close(self):
         """Close all database connections."""
         # Close connections in the same thread they were created

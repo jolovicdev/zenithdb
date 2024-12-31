@@ -327,6 +327,11 @@ def test_drop_collection(db):
     users.insert({"name":"Jim","age":22})
     db.drop_collection("users")
     assert db.list_collections() == []
+def test_list_collections(db):
+    """Test listing collections."""
+    users = db.collection("users")
+    orders = db.collection("orders")
+    assert db.list_collections() == ["orders", "users"]
 def test_create_and_insert():
     # Ensure a clean start
     if os.path.exists("DB_PATH"):

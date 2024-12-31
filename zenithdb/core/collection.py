@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, Dict, List, Optional, Union, Callable
 from ..query import Query, QueryOperator
 from ..operations import BulkOperations
@@ -12,7 +13,38 @@ class Collection:
         self.database = database
         self.name = name
         self.validator = None
-        self.__initiator()
+        self._ensure_collection_exists()
+    
+    def _ensure_collection_exists(self):
+        """Ensure collection exists with proper locking and error handling."""
+        with self.database.pool.get_connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")  # Get an immediate lock
+                cursor = conn.cursor()
+                cursor.execute("SELECT metadata FROM collections WHERE name = ?", [self.name])
+                result = cursor.fetchone()
+                
+                if result is None:
+                    # Collection doesn't exist, create it
+                    metadata = {"validator": None, "indexes": [], "options": {}}
+                    cursor.execute(
+                        "INSERT INTO collections (name, metadata) VALUES (?, ?)",
+                        [self.name, json.dumps(metadata)]
+                    )
+                else:
+                    # Collection exists, update timestamp and load validator
+                    metadata = json.loads(result[0])
+                    if metadata.get("validator"):
+                        self.validator = metadata["validator"]
+                    cursor.execute(
+                        "UPDATE collections SET updated_at = CURRENT_TIMESTAMP WHERE name = ?",
+                        [self.name]
+                    )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Failed to initialize collection {self.name}: {e}")
+                raise
     
     def __str__(self):
         return self.name
@@ -20,17 +52,6 @@ class Collection:
     def __repr__(self):
         return self.name
     
-    def __initiator(self):
-        with self.database.pool.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM collections WHERE name = ?", [self.name])
-            if cursor.fetchone() is None:
-                cursor.execute("INSERT INTO collections (name,metadata) VALUES (?,?)", 
-                             [self.name, "{\"validator\": null}"])
-                conn.commit()
-            else:
-                cursor.execute("UPDATE collections SET updated_at = CURRENT_TIMESTAMP WHERE name = ?", [self.name])
-                conn.commit()
     def print_collection(self):
         """Print a formatted view of the collection contents."""
         print_dict = {}
@@ -46,9 +67,26 @@ class Collection:
             print_dict["indexes"] = [json.loads(i["fields"]) for i in cursor.fetchall()]
             print(json.dumps(print_dict, indent=4, ensure_ascii=False))
             conn.commit()
+    
     def set_validator(self, validator_func: Callable[[Dict[str, Any]], bool]):
-        """Set document validator function."""
+        """Set and persist document validator function."""
         self.validator = validator_func
+        with self.database.pool.get_connection() as conn:
+            try:
+                conn.execute("BEGIN")
+                cursor = conn.cursor()
+                cursor.execute("SELECT metadata FROM collections WHERE name = ?", [self.name])
+                metadata = json.loads(cursor.fetchone()[0])
+                metadata["validator"] = validator_func.__name__  # Store function name for reference
+                cursor.execute(
+                    "UPDATE collections SET metadata = ? WHERE name = ?",
+                    [json.dumps(metadata), self.name]
+                )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Failed to set validator for collection {self.name}: {e}")
+                raise
     
     def insert(self, document: Dict[str, Any], doc_id: Optional[str] = None) -> str:
         """Insert a document into the collection."""
