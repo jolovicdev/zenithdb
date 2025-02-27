@@ -12,6 +12,9 @@ class QueryOperator(str, Enum):
     IN = "IN"
     BETWEEN = "BETWEEN"
     CONTAINS = "CONTAINS"
+    REGEX = "REGEX"
+    STARTS_WITH = "STARTS_WITH"
+    ENDS_WITH = "ENDS_WITH"
 
 class QueryField:
     """Represents a field in a query with operator overloading."""
@@ -58,6 +61,21 @@ class QueryField:
     def between(self, start: Any, end: Any) -> 'Query':
         """Check if field is between start and end values."""
         self.query.where(self.field_path, QueryOperator.BETWEEN, [start, end])
+        return self.query
+        
+    def regex(self, pattern: str) -> 'Query':
+        """Match field value against a regular expression pattern."""
+        self.query.where(self.field_path, QueryOperator.REGEX, pattern)
+        return self.query
+        
+    def starts_with(self, prefix: str) -> 'Query':
+        """Check if field value starts with the given prefix."""
+        self.query.where(self.field_path, QueryOperator.STARTS_WITH, prefix)
+        return self.query
+        
+    def ends_with(self, suffix: str) -> 'Query':
+        """Check if field value ends with the given suffix."""
+        self.query.where(self.field_path, QueryOperator.ENDS_WITH, suffix)
         return self.query
     
     def __getattr__(self, name: str) -> 'QueryField':
@@ -167,7 +185,10 @@ class Query:
                     QueryOperator.LT: "$lt",
                     QueryOperator.LTE: "$lte",
                     QueryOperator.NE: "$ne",
-                    QueryOperator.BETWEEN: "$between"
+                    QueryOperator.BETWEEN: "$between",
+                    QueryOperator.REGEX: "$regex",
+                    QueryOperator.STARTS_WITH: "$startsWith",
+                    QueryOperator.ENDS_WITH: "$endsWith"
                 }
                 if field not in result:
                     result[field] = {}

@@ -151,7 +151,9 @@ class Database:
     def bulk_operations(self) -> BulkOperations:
         """Get bulk operations interface."""
         with self.pool.get_connection() as conn:
-            return BulkOperations(conn)
+            ops = BulkOperations(conn)
+            ops._connection_from_pool = True  # Mark as coming from pool
+            return ops
     
     def _init_db(self) -> None:
         """Initialize database schema with proper transaction handling."""
@@ -202,44 +204,122 @@ class Database:
                 raise RuntimeError(f"Failed to initialize database schema: {e}")
     
     def create_index(self, collection: str, fields: Union[str, List[str]], 
-                    index_type: str = "btree", unique: bool = False) -> str:
-        """Create an index on specified fields."""
+                    index_type: str = "btree", unique: bool = False,
+                    full_text: bool = False) -> str:
+        """
+        Create an index on specified fields.
+        
+        Args:
+            collection: Collection name
+            fields: Field or fields to index
+            index_type: Type of index (btree, hash, etc.)
+            unique: Whether the index should enforce uniqueness
+            full_text: Whether to create a full-text search index
+        """
         if isinstance(fields, str):
             fields = [fields]
         
         # Generate index name
         safe_fields = [field.replace('.', '_') for field in fields]
-        index_name = f"idx_{collection}_{'_'.join(safe_fields)}"
+        index_prefix = "fts_" if full_text else "idx_"
+        index_name = f"{index_prefix}{collection}_{'_'.join(safe_fields)}"
         
         with self.pool.get_connection() as conn:
             try:
                 conn.execute("BEGIN")
                 
-                # Store index metadata
-                conn.execute("""
-                    INSERT OR REPLACE INTO indexes 
-                    (name, collection, fields, type, unique_index, created_at) 
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (index_name, collection, json.dumps(fields), index_type, int(unique)))
+                if full_text:
+                    # For full-text search, we need to create a virtual table
+                    # and keep it in sync with the documents table
+                    
+                    # Check if FTS5 module is available
+                    try:
+                        conn.execute("SELECT sqlite_source_id()")
+                        sqlite_version = conn.execute("SELECT sqlite_version()").fetchone()[0]
+                        has_fts5 = sqlite_version >= "3.9.0"
+                    except:
+                        has_fts5 = False
+                    
+                    fts_version = "fts5" if has_fts5 else "fts4"
+                    
+                    # Create the virtual table
+                    field_definitions = ', '.join(f"{field.replace('.', '_')}" for field in fields)
+                    conn.execute(f"""
+                        CREATE VIRTUAL TABLE IF NOT EXISTS {index_name} 
+                        USING {fts_version}(collection, id, {field_definitions}, tokenize=porter)
+                    """)
+                    
+                    # Insert existing data
+                    field_extracts = []
+                    for field in fields:
+                        extract = f"json_extract(data, '$.{field}')"
+                        field_extracts.append(extract)
+                    
+                    conn.execute(f"""
+                        INSERT INTO {index_name} (collection, id, {', '.join(safe_fields)})
+                        SELECT collection, id, {', '.join(field_extracts)}
+                        FROM documents
+                        WHERE collection = ?
+                    """, [collection])
+                    
+                    # Create triggers to keep the FTS index in sync
+                    # Insert trigger
+                    conn.execute(f"""
+                        CREATE TRIGGER IF NOT EXISTS {index_name}_insert AFTER INSERT ON documents
+                        WHEN new.collection = '{collection}'
+                        BEGIN
+                            INSERT INTO {index_name} (collection, id, {', '.join(safe_fields)})
+                            VALUES (new.collection, new.id, {', '.join(f"json_extract(new.data, '$.{field}')" for field in fields)});
+                        END
+                    """)
+                    
+                    # Update trigger
+                    conn.execute(f"""
+                        CREATE TRIGGER IF NOT EXISTS {index_name}_update AFTER UPDATE ON documents
+                        WHEN new.collection = '{collection}'
+                        BEGIN
+                            DELETE FROM {index_name} WHERE id = old.id;
+                            INSERT INTO {index_name} (collection, id, {', '.join(safe_fields)})
+                            VALUES (new.collection, new.id, {', '.join(f"json_extract(new.data, '$.{field}')" for field in fields)});
+                        END
+                    """)
+                    
+                    # Delete trigger
+                    conn.execute(f"""
+                        CREATE TRIGGER IF NOT EXISTS {index_name}_delete AFTER DELETE ON documents
+                        WHEN old.collection = '{collection}'
+                        BEGIN
+                            DELETE FROM {index_name} WHERE id = old.id;
+                        END
+                    """)
+                else:
+                    # Traditional index
+                    # Store index metadata
+                    conn.execute("""
+                        INSERT OR REPLACE INTO indexes 
+                        (name, collection, fields, type, unique_index, created_at) 
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (index_name, collection, json.dumps(fields), index_type, int(unique)))
+                    
+                    # Create the actual SQLite index
+                    field_exprs = []
+                    for field in fields:
+                        if '.' in field:
+                            # Handle nested fields
+                            expr = f"json_extract(data, '$.{field}')"
+                        else:
+                            expr = f"json_extract(data, '$.{field}')"
+                        field_exprs.append(expr)
+                    
+                    # Create index with uniqueness constraint if specified
+                    # Note: Collection name is hardcoded in WHERE clause since SQLite doesn't allow parameters there
+                    index_sql = f"""
+                        CREATE {'UNIQUE' if unique else ''} INDEX IF NOT EXISTS {index_name}
+                        ON documents({', '.join(['collection'] + field_exprs)})
+                        WHERE collection = '{collection}'
+                    """
+                    conn.execute(index_sql)
                 
-                # Create the actual SQLite index
-                field_exprs = []
-                for field in fields:
-                    if '.' in field:
-                        # Handle nested fields
-                        expr = f"json_extract(data, '$.{field}')"
-                    else:
-                        expr = f"json_extract(data, '$.{field}')"
-                    field_exprs.append(expr)
-                
-                # Create index with uniqueness constraint if specified
-                # Note: Collection name is hardcoded in WHERE clause since SQLite doesn't allow parameters there
-                index_sql = f"""
-                    CREATE {'UNIQUE' if unique else ''} INDEX IF NOT EXISTS {index_name}
-                    ON documents({', '.join(['collection'] + field_exprs)})
-                    WHERE collection = '{collection}'
-                """
-                conn.execute(index_sql)
                 conn.commit()
                 return index_name
                 
@@ -265,11 +345,36 @@ class Database:
             } for row in cursor]
     
     def drop_index(self, index_name: str):
-        """Drop an index by name."""
+        """
+        Drop an index by name.
+        
+        Args:
+            index_name: Name of the index to drop
+        """
         with self.pool.get_connection() as conn:
-            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
-            conn.execute("DELETE FROM indexes WHERE name = ?", [index_name])
-            conn.commit()
+            try:
+                conn.execute("BEGIN")
+                
+                # Check if it's a FTS index
+                if index_name.startswith("fts_"):
+                    # Drop the FTS virtual table
+                    conn.execute(f"DROP TABLE IF EXISTS {index_name}")
+                    
+                    # Drop the associated triggers
+                    conn.execute(f"DROP TRIGGER IF EXISTS {index_name}_insert")
+                    conn.execute(f"DROP TRIGGER IF EXISTS {index_name}_update")
+                    conn.execute(f"DROP TRIGGER IF EXISTS {index_name}_delete")
+                else:
+                    # Drop regular index
+                    conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+                
+                # Remove from indexes table
+                conn.execute("DELETE FROM indexes WHERE name = ?", [index_name])
+                
+                conn.commit()
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to drop index {index_name}: {e}")
     
     def insert(self, collection: str, document: Dict[str, Any], doc_id: Optional[str] = None) -> str:
         """Insert a document into a collection."""
@@ -346,6 +451,22 @@ class Database:
                 else:
                     conditions.append(f"json_extract(data, '$.{field}') = ?")
                     params.append(value)
+            elif op == QueryOperator.REGEX:
+                conditions.append(f"json_extract(data, '$.{field}') REGEXP ?")
+                params.append(value)
+            elif op == QueryOperator.STARTS_WITH:
+                conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
+                params.append(f"{value}%")
+            elif op == QueryOperator.ENDS_WITH:
+                conditions.append(f"json_extract(data, '$.{field}') LIKE ?")
+                params.append(f"%{value}")
+            elif op == QueryOperator.BETWEEN:
+                conditions.append(f"json_extract(data, '$.{field}') BETWEEN ? AND ?")
+                params.extend(value)  # value should be a list of [start, end]
+            elif op == QueryOperator.IN:
+                placeholders = ','.join(['?' for _ in value])
+                conditions.append(f"json_extract(data, '$.{field}') IN ({placeholders})")
+                params.extend(value)
             else:
                 op_map = {
                     QueryOperator.GT: ">",
@@ -570,13 +691,61 @@ class Database:
         except sqlite3.Error:
             return False
     
-    def list_collections(self) -> list[Collection]:
-        """Get list of all collection names in the database."""
+    def backup(self, destination_path: str) -> bool:
+        """
+        Create a backup of the database.
+        
+        Args:
+            destination_path: Path to save the backup to
+            
+        Returns:
+            True if backup was successful, False otherwise
+        """
         with self.pool.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT name FROM collections ORDER BY name")
-            return sorted([row[0] for row in cursor.fetchall()])
-
+            try:
+                # Use SQLite's built-in backup API
+                backup_conn = sqlite3.connect(destination_path)
+                conn.backup(backup_conn)
+                backup_conn.close()
+                return True
+            except (sqlite3.Error, IOError) as e:
+                raise RuntimeError(f"Failed to create backup: {e}")
+    
+    def restore(self, backup_path: str) -> bool:
+        """
+        Restore the database from a backup.
+        
+        Args:
+            backup_path: Path to the backup file
+            
+        Returns:
+            True if restore was successful, False otherwise
+        """
+        # Close all connections first
+        self.close()
+        
+        try:
+            # Open backup file
+            backup_conn = sqlite3.connect(backup_path)
+            # Open destination database
+            dest_conn = sqlite3.connect(self.db_path)
+            # Perform restore
+            backup_conn.backup(dest_conn)
+            # Clean up
+            backup_conn.close()
+            dest_conn.close()
+            
+            # Reinitialize connection pool
+            self.pool = ConnectionPool(self.db_path, self.pool.max_connections)
+            return True
+        except (sqlite3.Error, IOError) as e:
+            # Attempt to reinitialize connection pool in case of failure
+            try:
+                self.pool = ConnectionPool(self.db_path, self.pool.max_connections)
+            except:
+                pass
+            raise RuntimeError(f"Failed to restore from backup: {e}")
+    
     def close(self):
         """Close all database connections."""
         # Close connections in the same thread they were created

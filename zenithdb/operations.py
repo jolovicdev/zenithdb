@@ -2,6 +2,7 @@ import sqlite3
 import json
 import uuid
 from typing import List, Dict, Any, Optional, Callable
+from contextlib import contextmanager
 
 BATCH_SIZE = 1000
 
@@ -14,6 +15,7 @@ class BulkOperations:
             raise TypeError("Expected sqlite3.Connection object")
         self.connection = connection
         self._transaction_active = False
+        self._connection_from_pool = False  # Flag to track if from connection pool
         self.retry_count = 3
         self.progress_callback = None
     
@@ -51,6 +53,25 @@ class BulkOperations:
             except Exception:
                 pass
         self._transaction_active = False
+    
+    @contextmanager
+    def transaction(self):
+        """
+        Context manager for transactions.
+        
+        Usage:
+            with bulk_ops.transaction():
+                bulk_ops.bulk_insert(...)
+                bulk_ops.bulk_update(...)
+        """
+        self.__enter__()
+        try:
+            yield self
+        except Exception as e:
+            self.__exit__(type(e), e, None)
+            raise
+        else:
+            self.__exit__(None, None, None)
     
     def bulk_insert(self, collection: str, documents: List[Dict[str, Any]], 
                    doc_ids: Optional[List[str]] = None) -> List[str]:
